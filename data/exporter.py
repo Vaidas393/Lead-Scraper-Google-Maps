@@ -9,8 +9,8 @@ from config.settings import LEADS_RAW_CSV, LEADS_QUALIFIED_CSV
 logger = logging.getLogger(__name__)
 
 CSV_HEADERS = [
-    "Name", "Category", "Address", "Phone", "Email", "Rating", "Reviews",
-    "Has Website", "Website URL", "Google Maps URL", "Metro Area",
+    "Name", "Category", "Address", "Phone", "Business Email", "Rating", "Reviews",
+    "Has Website", "Website URL", "Google Maps URL", "Metro Area", "State",
     "Search Query", "Scraped At",
 ]
 

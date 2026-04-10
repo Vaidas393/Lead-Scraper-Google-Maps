@@ -2,7 +2,7 @@
 
 import re
 import logging
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote
 from playwright.async_api import Page
 
 from config.settings import (
@@ -129,21 +129,21 @@ async def _extract_detail_email(page: Page) -> str | None:
                 # Check for mailto href
                 href = await el.get_attribute("href")
                 if href and href.startswith("mailto:"):
-                    email = href.replace("mailto:", "").split("?")[0].strip()
+                    email = unquote(href.replace("mailto:", "").split("?")[0].strip())
                     if _is_valid_email(email):
                         return email
                 # Check aria-label
                 aria = await el.get_attribute("aria-label")
                 if aria:
                     match = EMAIL_RE.search(aria)
-                    if match and _is_valid_email(match.group()):
-                        return match.group()
+                    if match and _is_valid_email(unquote(match.group())):
+                        return unquote(match.group())
                 # Check text content
                 text = await el.inner_text()
                 if text:
                     match = EMAIL_RE.search(text)
-                    if match and _is_valid_email(match.group()):
-                        return match.group()
+                    if match and _is_valid_email(unquote(match.group())):
+                        return unquote(match.group())
         except Exception:
             continue
     return None
@@ -163,7 +163,7 @@ async def _extract_email_from_website(page: Page, website_url: str) -> str | Non
         for i in range(min(count, 5)):
             href = await mailto_links.nth(i).get_attribute("href")
             if href:
-                email = href.replace("mailto:", "").split("?")[0].strip()
+                email = unquote(href.replace("mailto:", "").split("?")[0].strip())
                 if _is_valid_email(email):
                     return email
 
@@ -171,6 +171,7 @@ async def _extract_email_from_website(page: Page, website_url: str) -> str | Non
         body_text = await new_page.inner_text("body")
         matches = EMAIL_RE.findall(body_text)
         for email in matches:
+            email = unquote(email)
             if _is_valid_email(email):
                 return email
 
@@ -215,6 +216,8 @@ async def search_and_scrape(
     page: Page,
     query: str,
     metro_area: str,
+    state: str = "",
+    on_business=None,
 ) -> list[Business]:
     """
     Execute a single search on Google Maps and extract all business details.
@@ -223,6 +226,9 @@ async def search_and_scrape(
         page: Playwright page with stealth applied.
         query: Search query like "plumbers in Houston TX".
         metro_area: Metro area name for tagging results.
+        on_business: Optional callback called immediately after each business
+                     is extracted. Signature: on_business(business: Business).
+                     Use this for incremental CSV writes.
 
     Returns:
         List of Business objects extracted from this search.
@@ -263,10 +269,12 @@ async def search_and_scrape(
 
     for i in range(links_count):
         try:
-            business = await _extract_single_result(page, link_selector, i, query, metro_area)
+            business = await _extract_single_result(page, link_selector, i, query, metro_area, state)
             if business:
                 results.append(business)
                 logger.debug(f"  [{i+1}/{links_count}] {business.name} | website={business.has_website} | email={business.email}")
+                if on_business:
+                    on_business(business)
         except Exception as e:
             logger.error(f"  [{i+1}/{links_count}] Failed to extract: {e}")
             continue
@@ -283,13 +291,18 @@ async def _extract_single_result(
     index: int,
     query: str,
     metro_area: str,
+    state: str = "",
 ) -> Business | None:
     """Click into a single result and extract its business details."""
     # Re-locate the link (DOM may have shifted)
     link = page.locator(link_selector).nth(index)
 
-    # Get the business name from aria-label before clicking
-    card_name = await link.get_attribute("aria-label") or ""
+    # Get the business name from aria-label before clicking.
+    # Google's aria-label format: "Business Name · 4.5 stars · 23 reviews"
+    # The separator can be " · " (U+00B7), " ‧ " (U+2027), or " • " (U+2022).
+    raw_aria = await link.get_attribute("aria-label") or ""
+    # Split on any middle-dot/bullet variant surrounded by optional spaces
+    card_name = re.split(r"\s[·‧•]\s", raw_aria)[0].strip() if raw_aria else ""
 
     # Get the maps URL
     maps_url = await link.get_attribute("href") or ""
@@ -353,5 +366,6 @@ async def _extract_single_result(
         website_url=website_url,
         google_maps_url=maps_url,
         metro_area=metro_area,
+        state=state or None,
         search_query=query,
     )

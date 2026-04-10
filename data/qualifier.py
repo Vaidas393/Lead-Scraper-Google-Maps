@@ -16,6 +16,9 @@ def is_qualified_lead(business: Business) -> bool:
     - Has a phone number
     - Rating >= MIN_RATING (default 3.0)
     - Review count >= MIN_REVIEWS (default 5)
+
+    NOTE: Business Email is intentionally NOT required. A lead qualifies
+    with or without a scraped email address.
     """
     if business.has_website:
         return False

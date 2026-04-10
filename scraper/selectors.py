@@ -34,6 +34,8 @@ SELECTORS = {
 
     # --- Detail Panel ---
     "detail_name": [
+        "h1.DUwDvf",
+        "h1.fontHeadlineLarge",
         "h1",
     ],
     "detail_address": [

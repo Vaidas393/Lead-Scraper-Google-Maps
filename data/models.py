@@ -19,6 +19,7 @@ class Business(BaseModel):
     website_url: Optional[str] = None
     google_maps_url: Optional[str] = None
     metro_area: str = ""
+    state: Optional[str] = None
     search_query: str = ""
     scraped_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -37,13 +38,14 @@ class Business(BaseModel):
             "Category": self.category or "",
             "Address": self.address or "",
             "Phone": self.phone or "",
-            "Email": self.email or "",
+            "Business Email": self.email or "",
             "Rating": self.rating if self.rating is not None else "",
             "Reviews": self.review_count if self.review_count is not None else "",
             "Has Website": "Yes" if self.has_website else "No",
             "Website URL": self.website_url or "",
             "Google Maps URL": self.google_maps_url or "",
             "Metro Area": self.metro_area,
+            "State": self.state or "",
             "Search Query": self.search_query,
             "Scraped At": self.scraped_at.isoformat(),
         }

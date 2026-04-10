@@ -72,17 +72,29 @@ From project root:
 python main.py
 ```
 
-Useful options:
+Running with no arguments launches the **interactive setup wizard** — it will ask for state(s), category count, and headless mode before starting.
+
+### CLI Options
 
 ```powershell
-# Run first 3 metros and first 2 categories (quick test)
+# Scrape a specific state (full name or abbreviation)
+python main.py --state Texas
+python main.py --state TX
+
+# Scrape multiple states at once
+python main.py --state TX FL CA
+
+# Mix full names and abbreviations
+python main.py --state Texas "New York" FL
+
+# Quick test: first 2 categories in Texas, headless
+python main.py --state TX --categories 2 --headless
+
+# Skip the interactive prompt and run with defaults
+python main.py --yes
+
+# Limit metros and categories (for testing)
 python main.py --metros 3 --categories 2
-
-# Run browser in headless mode
-python main.py --headless
-
-# Combine both
-python main.py --metros 2 --categories 2 --headless
 ```
 
 ## How It Works (Execution Flow)
@@ -104,12 +116,12 @@ python main.py --metros 2 --categories 2 --headless
 
 All outputs are written to `output/`:
 
-- `leads_raw.csv` - Every unique business found
-- `leads_qualified.csv` - Only businesses matching lead criteria
-- `progress.json` - Pair-level status (`completed`, `in_progress`, `failed`)
-- `seen_keys.json` - Dedup key registry across runs
-- `checkpoints/*.json` - Per-pair temporary saved results
-- `scraper.log` - Detailed logs
+- `leads_raw.csv` — Every unique business found (columns: Name, Category, Address, Phone, Business Email, Rating, Reviews, Has Website, Website URL, Google Maps URL, Metro Area, **State**, Search Query, Scraped At)
+- `leads_qualified.csv` — Only businesses matching lead criteria (same columns)
+- `progress.json` — Pair-level status (`completed`, `in_progress`, `failed`)
+- `seen_keys.json` — Dedup key registry across runs
+- `checkpoints/*.json` — Per-pair temporary saved results
+- `scraper.log` — Detailed logs
 
 ## Tuning and Customization
 
