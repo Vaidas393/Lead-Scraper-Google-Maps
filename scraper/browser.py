@@ -5,13 +5,7 @@ import logging
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from playwright_stealth import Stealth
 
-from config.settings import (
-    HEADLESS,
-    BROWSER_ARGS,
-    VIEWPORT_WIDTH_RANGE,
-    VIEWPORT_HEIGHT_RANGE,
-    USER_AGENTS,
-)
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +23,8 @@ class BrowserManager:
         """Launch browser and return a stealth page."""
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(
-            headless=HEADLESS,
-            args=BROWSER_ARGS,
+            headless=settings.HEADLESS,
+            args=settings.BROWSER_ARGS,
         )
         return await self.new_context()
 
@@ -40,10 +34,10 @@ class BrowserManager:
             await self._context.close()
 
         viewport = {
-            "width": random.randint(*VIEWPORT_WIDTH_RANGE),
-            "height": random.randint(*VIEWPORT_HEIGHT_RANGE),
+            "width": random.randint(*settings.VIEWPORT_WIDTH_RANGE),
+            "height": random.randint(*settings.VIEWPORT_HEIGHT_RANGE),
         }
-        user_agent = random.choice(USER_AGENTS)
+        user_agent = random.choice(settings.USER_AGENTS)
 
         self._context = await self._browser.new_context(
             viewport=viewport,
