@@ -1,0 +1,14 @@
+services:
+  scraper:
+    build: .
+    image: gmaps-lead-scraper:latest
+    # Chromium needs more than default 64MB shared memory or tabs crash.
+    shm_size: "2gb"
+    volumes:
+      # Host folder `results` holds the same files as local `output/` (CSVs, log, progress, checkpoints).
+      - ./results:/app/output
+    # Override for targeted runs, e.g.:
+    # command: ["python", "main.py", "--headless", "-y", "--state", "TX", "--categories", "2"]
+    command: ["python", "main.py", "--headless", "-y"]
+    stdin_open: false
+    tty: false
