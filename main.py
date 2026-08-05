@@ -1,335 +1,305 @@
 """
-Google Maps Lead Scraper — Main Entry Point
+Google Maps Lead Scraper — entry point.
 
-Scrapes Google Maps for businesses without websites but with reviews.
-These are digitally underserved leads ideal for outreach.
+Point it at any city or area, choose how deep to dig, and watch it run.
 
 Usage:
-    python main.py                          # Full run: all metros, all categories
-    python main.py --metros 3 --categories 2  # Test run: first 3 metros, 2 categories
-    python main.py --headless               # Run in headless mode
+    python main.py                                      # interactive wizard + dashboard
+    python main.py --city "Austin TX" --categories plumbers electricians
+    python main.py --city Lahore --depth areas --profile no_website
+    python main.py --doctor                             # check selectors against live Maps
 """
 
-import sys
-import asyncio
 import argparse
+import asyncio
 import logging
+import sys
 from pathlib import Path
 
-# Add project root to path
+# Add project root to path so the package imports resolve when run directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config.metros import METROS
-from config.categories import CATEGORIES
-from config import settings
-from scraper.browser import BrowserManager
-from scraper.maps_scraper import search_and_scrape
-from scraper.anti_detect import is_blocked, random_delay, search_delay
-from data.dedup import Deduplicator
-from data.qualifier import filter_qualified
-from data.exporter import export_raw, export_qualified, get_csv_row_count
-from persistence.progress import ProgressTracker
-from persistence.checkpoint import save_checkpoint, clear_checkpoint
+from config import settings                                    # noqa: E402
+from config.categories import CATEGORIES                       # noqa: E402
+from config.enums import Depth, LeadProfile                    # noqa: E402
+from config.metros import METROS                               # noqa: E402
+from config.paths import OutputPaths                           # noqa: E402
+from config.runconfig import RunConfig                         # noqa: E402
+from reporting import format_duration                          # noqa: E402
+from runner import ScraperRun                                  # noqa: E402
+from ui.console import console, is_interactive                 # noqa: E402
+from ui.dashboard import make_reporter                         # noqa: E402
 
 logger = logging.getLogger("gmaps_scraper")
 
-# Mapping of full US state names -> 2-letter abbreviation (case-insensitive lookup)
-US_STATE_MAP: dict[str, str] = {
-    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
-    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
-    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
-    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
-    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
-    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
-    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
-    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
-    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
-    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
-    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
-    "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
-    "wisconsin": "WI", "wyoming": "WY", "district of columbia": "DC",
-}
 
-
-def setup_logging():
-    """Configure logging to console and file."""
-    settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def setup_logging(log_file: Path, quiet_console: bool = False):
+    """Console at INFO (unless the dashboard owns the terminal), file at DEBUG."""
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
 
-    # Console: INFO
-    console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
-    console.setFormatter(logging.Formatter(
-        "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%H:%M:%S"
-    ))
-    root_logger.addHandler(console)
+    if not quiet_console:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%H:%M:%S"
+        ))
+        root_logger.addHandler(console_handler)
 
-    # File: DEBUG
-    file_handler = logging.FileHandler(settings.LOG_FILE, encoding="utf-8")
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(
         "%(asctime)s | %(name)s | %(levelname)-7s | %(message)s"
     ))
     root_logger.addHandler(file_handler)
 
-
-def _resolve_states(raw_states: list[str]) -> set[str]:
-    """
-    Convert a list of state inputs (abbreviations OR full names) to uppercase abbreviations.
-    e.g. ["Texas", "FL", "new york"] -> {"TX", "FL", "NY"}
-    """
-    resolved = set()
-    for s in raw_states:
-        upper = s.upper()
-        lower = s.lower()
-        if upper in {v for v in US_STATE_MAP.values()}:
-            resolved.add(upper)
-        elif lower in US_STATE_MAP:
-            resolved.add(US_STATE_MAP[lower])
-        else:
-            logger.warning(f"Unknown state '{s}' — skipping. Use abbreviation (TX) or full name (Texas).")
-    return resolved
+    # Playwright is extremely chatty at DEBUG.
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Google Maps Lead Scraper",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                          # Interactive mode (recommended)
-  python main.py --state Texas Florida    # Scrape specific states by full name
-  python main.py --state TX FL            # Same using abbreviations
-  python main.py --metros 3 --categories 2  # Quick test run
-  python main.py --headless               # Run without browser window
-"""
+  python main.py                                     Interactive wizard (recommended)
+  python main.py --city "Austin TX" --depth areas    Split the city into sub-areas
+  python main.py --city Lahore --categories dentists Non-US works the same way
+  python main.py --city "Miami FL" --depth grid --grid 4x4
+  python main.py --doctor                            Check selectors against live Maps
+  python main.py --list-categories                   Show the built-in categories
+""",
     )
-    parser.add_argument(
-        "--metros", type=int, default=None,
-        help="Limit to first N metros (for testing)"
-    )
-    parser.add_argument(
-        "--categories", type=int, default=None,
-        help="Limit to first N categories (for testing)"
-    )
-    parser.add_argument(
-        "--headless", action="store_true",
-        help="Run browser in headless mode (no visible window)"
-    )
-    parser.add_argument(
-        "--state", type=str, nargs="+", metavar="STATE",
-        help="Filter by state(s) — accepts full name or abbreviation, e.g. --state Texas Florida"
-    )
-    parser.add_argument(
-        "--yes", "-y", action="store_true",
-        help="Skip interactive prompts and run with defaults"
-    )
-    return parser.parse_args()
+
+    target = parser.add_argument_group("target")
+    target.add_argument("--city", "--area", dest="city", type=str,
+                        help="City or area to scrape. Anything Google Maps understands.")
+    target.add_argument("--metro", type=str,
+                        help="Use a built-in US metro preset by name, e.g. --metro Houston")
+    target.add_argument("--categories", nargs="+", metavar="CAT",
+                        help="Business categories. Defaults to the built-in list.")
+    target.add_argument("--depth", choices=[d.value for d in Depth], default=None,
+                        help="city = 1 search per category; areas = per sub-area; grid = per map tile")
+
+    quality = parser.add_argument_group("lead quality")
+    quality.add_argument("--profile", choices=[p.value for p in LeadProfile], default=None,
+                         help="Which businesses count as qualified leads")
+    quality.add_argument("--min-rating", type=float, default=None)
+    quality.add_argument("--min-reviews", type=int, default=None)
+    quality.add_argument("--no-require-phone", action="store_true",
+                         help="Qualify leads even without a phone number")
+    quality.add_argument("--no-website-crawl", action="store_true",
+                         help="Never open business websites to hunt for emails/socials (much faster)")
+
+    scope = parser.add_argument_group("scope")
+    scope.add_argument("--max-areas", type=int, default=None,
+                       help=f"Sub-areas to search at depth=areas (default {settings.MAX_SUBAREAS})")
+    scope.add_argument("--grid", type=str, default=None, metavar="RxC",
+                       help="Grid size at depth=grid, e.g. 3x3")
+    scope.add_argument("--grid-span", type=float, default=None, metavar="KM",
+                       help=f"Width of the grid in km (default {settings.GRID_SPAN_KM:g})")
+    scope.add_argument("--max-results", type=int, default=None,
+                       help="Cap results per search")
+
+    runtime = parser.add_argument_group("runtime")
+    runtime.add_argument("--headless", action="store_true", help="Hide the browser window")
+    runtime.add_argument("--proxy", type=str, default=None,
+                         help="Proxy URL, e.g. http://user:pass@host:port")
+    runtime.add_argument("--output", type=str, default=None, help="Output directory")
+    runtime.add_argument("--concurrency", type=int, default=None, metavar="N",
+                         help="Run N browsers in parallel (default 1). Faster, but N times "
+                              "the request rate and a correspondingly higher block risk.")
+    runtime.add_argument("--no-resume", action="store_true",
+                         help="Ignore saved progress and re-scrape everything")
+    runtime.add_argument("--no-tui", action="store_true", help="Plain log output, no dashboard")
+    runtime.add_argument("--yes", "-y", action="store_true",
+                         help="Skip the wizard and run with defaults")
+
+    tools = parser.add_argument_group("tools")
+    tools.add_argument("--doctor", action="store_true",
+                       help="Check every selector against live Google Maps and exit")
+    tools.add_argument("--list-categories", action="store_true",
+                       help="Print the built-in categories and exit")
+
+    return parser.parse_args(argv)
 
 
-def _interactive_prompt() -> dict:
-    """
-    Guide the user through configuration interactively.
-    Returns a dict with keys: state_filter, category_limit, metro_limit, headless.
-    """
-    print()
-    print("╔══════════════════════════════════════════════════╗")
-    print("║      Google Maps Lead Scraper — Setup Wizard     ║")
-    print("╚══════════════════════════════════════════════════╝")
-    print()
-
-    # --- State filter ---
-    available_abbrs = sorted({m["state"] for m in METROS})
-    print(f"Available states: {', '.join(available_abbrs)}")
-    print("Enter state name(s) or abbreviation(s) to filter (comma-separated),")
-    state_input = input("or press ENTER to scrape ALL states: ").strip()
-    raw_states = [s.strip() for s in state_input.split(",") if s.strip()] if state_input else []
-
-    # --- Category limit ---
-    print(f"\nThere are {len(CATEGORIES)} business categories configured.")
-    cat_input = input("How many categories to scrape? (ENTER = all): ").strip()
-    category_limit = int(cat_input) if cat_input.isdigit() else None
-
-    # --- Headless ---
-    headless_input = input("\nRun in headless mode? (browser hidden) [y/N]: ").strip().lower()
-    headless = headless_input in ("y", "yes")
-
-    print()
-    return {"raw_states": raw_states, "category_limit": category_limit, "metro_limit": None, "headless": headless}
+def _resolve_metro(name: str) -> str | None:
+    """Look up a metro preset by name or search term, case-insensitively."""
+    wanted = name.strip().lower()
+    for metro in METROS:
+        if wanted in (metro["name"].lower(), metro["search_term"].lower()):
+            return metro["search_term"]
+    matches = [m for m in METROS if wanted in m["name"].lower()]
+    return matches[0]["search_term"] if len(matches) == 1 else None
 
 
-async def run():
-    args = parse_args()
-    setup_logging()
+def _parse_grid(value: str) -> tuple[int, int] | None:
+    """Parse '3x3' into (3, 3)."""
+    for sep in ("x", "X", ","):
+        if sep in value:
+            left, _, right = value.partition(sep)
+            if left.strip().isdigit() and right.strip().isdigit():
+                return int(left), int(right)
+    return None
 
-    # ── Interactive mode: triggered when no filtering args are provided ──
-    no_args_given = not args.state and not args.metros and not args.categories and not args.headless and not args.yes
-    if no_args_given:
-        cfg = _interactive_prompt()
-        raw_states = cfg["raw_states"]
-        category_limit = cfg["category_limit"]
-        metro_limit = cfg["metro_limit"]
-        if cfg["headless"]:
-            settings.HEADLESS = True
+
+def config_from_args(args) -> RunConfig:
+    """Build a RunConfig from CLI flags, falling back to settings defaults."""
+    cfg = RunConfig()
+
+    if args.output:
+        cfg.output = OutputPaths(root=Path(args.output))
+
+    if args.metro:
+        resolved = _resolve_metro(args.metro)
+        if not resolved:
+            raise SystemExit(
+                f"Unknown metro '{args.metro}'. Run --list-categories to see the "
+                "category list, or pass --city to scrape any place directly."
+            )
+        cfg.target_input = resolved
+    if args.city:
+        cfg.target_input = args.city
+    elif not cfg.target_input and settings.CITY:
+        # Lets Docker/CI set a target without overriding the command.
+        cfg.target_input = settings.CITY
+
+    if args.categories:
+        cfg.categories = args.categories
+    elif settings.CATEGORIES_OVERRIDE:
+        cfg.categories = settings.CATEGORIES_OVERRIDE
     else:
-        raw_states = args.state or []
-        category_limit = args.categories
-        metro_limit = args.metros
-        if args.headless:
-            settings.HEADLESS = True
+        cfg.categories = list(CATEGORIES)
 
-    metros = METROS[:metro_limit] if metro_limit else METROS
-    categories = CATEGORIES[:category_limit] if category_limit else CATEGORIES
+    if args.depth:
+        cfg.depth = Depth(args.depth)
+    elif settings.DEPTH:
+        cfg.depth = Depth(settings.DEPTH)
+    if args.profile:
+        cfg.profile = LeadProfile(args.profile)
+    if args.min_rating is not None:
+        cfg.min_rating = args.min_rating
+    if args.min_reviews is not None:
+        cfg.min_reviews = args.min_reviews
+    if args.no_require_phone:
+        cfg.require_phone = False
+    if args.no_website_crawl:
+        cfg.fetch_website_email = False
+    if args.max_areas is not None:
+        cfg.max_subareas = args.max_areas
+    if args.grid:
+        parsed = _parse_grid(args.grid)
+        if not parsed:
+            raise SystemExit(f"Could not parse --grid '{args.grid}'. Use e.g. 3x3.")
+        cfg.grid_rows, cfg.grid_cols = parsed
+    if args.grid_span is not None:
+        cfg.grid_span_km = args.grid_span
+    if args.max_results is not None:
+        cfg.max_results_per_unit = args.max_results
+    if args.headless:
+        cfg.headless = True
+    if args.proxy:
+        cfg.proxy = args.proxy
+    if args.concurrency is not None:
+        cfg.concurrency = args.concurrency
 
-    # ── Filter metros by state ──
-    if raw_states:
-        state_filter = _resolve_states(raw_states)
-        if not state_filter:
-            logger.error("No valid states found after resolving input. Exiting.")
-            return
-        metros = [m for m in metros if m.get("state", "").upper() in state_filter]
-        if not metros:
-            logger.error(f"No metros found for state(s): {', '.join(state_filter)}")
-            return
-        logger.info(f"Filtered to {len(metros)} metro(s) in state(s): {', '.join(state_filter)}")
+    cfg.resume = not args.no_resume
+    cfg.tui = not args.no_tui
+    return cfg
 
-    total_pairs = len(metros) * len(categories)
-    logger.info(f"Starting scraper: {len(metros)} metros x {len(categories)} categories = {total_pairs} searches")
 
-    progress = ProgressTracker()
-    dedup = Deduplicator()
-    browser = BrowserManager()
+def print_summary(summary: dict, aborted: str | None):
+    """Final report, printed after the dashboard has released the terminal."""
+    from rich.panel import Panel
+    from rich.table import Table
 
-    detail_visits = 0  # Track for context refresh
-    total_leads = 0
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="dim")
+    table.add_column(style="bold")
+    table.add_row("Target", f"{summary['target']}  (depth={summary['depth']})")
+    table.add_row("Searches", (
+        f"{summary['units_done']} done, {summary['units_failed']} failed, "
+        f"{summary['units_skipped']} skipped, of {summary['units_total']}"
+    ))
+    table.add_row("Businesses found", str(summary["found"]))
+    table.add_row("Unique / duplicates", f"{summary['unique']} / {summary['duplicates']}")
+    table.add_row("Qualified leads", f"[green]{summary['qualified']}[/green]")
+    if summary["blocks"]:
+        table.add_row("Blocks hit", f"[yellow]{summary['blocks']}[/yellow]")
+    table.add_row("Rows in leads_raw.csv", str(summary["raw_rows"]))
+    table.add_row("Rows in leads_qualified.csv", str(summary["qualified_rows"]))
+    table.add_row("Dedup pool", str(summary["dedup_pool"]))
+    table.add_row("Elapsed", format_duration(summary["elapsed"]))
+
+    border = "yellow" if aborted else "green"
+    console.print(Panel(table, title="Run complete", border_style=border))
+    if aborted:
+        console.print(f"[yellow]{aborted}[/yellow]")
+        console.print("[dim]Progress was saved — re-run the same command to resume.[/dim]")
+
+
+async def run(args) -> int:
+    """Async half of the entry point. Arg parsing happens before the loop
+    starts, so argparse's SystemExit never has to unwind through asyncio."""
+    if args.doctor:
+        setup_logging(OutputPaths(root=settings.OUTPUT_DIR).log_file)
+        from scraper.doctor import run_doctor
+        ok = await run_doctor(headless=args.headless)
+        return 0 if ok else 1
+
+    cfg = config_from_args(args)
+
+    # The wizard runs when the user gave no target and we have a real terminal.
+    wants_wizard = not cfg.target_input and not args.yes and is_interactive()
+    if wants_wizard:
+        from ui.wizard import WizardCancelled, run_wizard
+        try:
+            cfg = run_wizard(cfg)
+        except (WizardCancelled, KeyboardInterrupt):
+            console.print("[yellow]Cancelled.[/yellow]")
+            return 130
+
+    if not cfg.target_input:
+        console.print(
+            "[red]No target specified.[/red] Pass [bold]--city \"Austin TX\"[/bold] "
+            "(or --metro Houston), or run without [bold]-y[/bold] for the setup wizard."
+        )
+        return 2
+
+    reporter = make_reporter(cfg.tui)
+    uses_dashboard = reporter.__class__.__name__ == "DashboardReporter"
+    setup_logging(cfg.output.log_file, quiet_console=uses_dashboard)
+
+    if not uses_dashboard:
+        from ui.wizard import default_config_notice
+        default_config_notice(cfg)
+
+    run_obj = ScraperRun(cfg, reporter)
+    stats = await run_obj.execute()
+    print_summary(run_obj.summary(), stats.aborted_reason)
+
+    return 0 if not stats.aborted_reason else 1
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    if args.list_categories:
+        for category in CATEGORIES:
+            console.print(f"  {category}")
+        raise SystemExit(0)
 
     try:
-        page = await browser.start()
-
-        for metro_idx, metro in enumerate(metros):
-            city = metro["search_term"]
-            metro_name = metro["name"]
-
-            logger.info(f"\n{'='*60}")
-            logger.info(f"Metro [{metro_idx+1}/{len(metros)}]: {metro_name}")
-            logger.info(f"{'='*60}")
-
-            for cat_idx, category in enumerate(categories):
-                # Skip completed pairs
-                if progress.is_completed(city, category):
-                    logger.info(f"  Skipping (already done): {category} in {city}")
-                    continue
-
-                progress.mark_in_progress(city, category)
-                query = f"{category} in {city}"
-                pair_label = f"[{metro_idx+1}/{len(metros)}][{cat_idx+1}/{len(categories)}]"
-
-                logger.info(f"  {pair_label} Searching: {query}")
-
-                try:
-                    # Check for blocks before searching
-                    if await is_blocked(page):
-                        logger.warning("Blocked! Pausing and refreshing context...")
-                        await random_delay(
-                            settings.CAPTCHA_PAUSE_SECONDS,
-                            settings.CAPTCHA_PAUSE_SECONDS + 60,
-                        )
-                        page = await browser.new_context()
-
-                    # Incremental dedup + export: called immediately after each business
-                    unique_in_search: list = []
-
-                    def on_business(b):
-                        unique = dedup.deduplicate([b])
-                        if unique:
-                            export_raw(unique)
-                            unique_in_search.append(unique[0])
-
-                    # Execute the search and scrape (writes to CSV per-business)
-                    businesses = await search_and_scrape(
-                        page, query, metro_name,
-                        state=metro.get("state", ""),
-                        on_business=on_business,
-                    )
-                    detail_visits += len(businesses)
-
-                    if not businesses:
-                        logger.warning(
-                            f"  {pair_label} Search returned 0 businesses — "
-                            "possible block or no results. Will retry next run."
-                        )
-                        progress.mark_failed(city, category)
-                        continue
-
-                    # Checkpoint raw list for recovery
-                    save_checkpoint(city, category, businesses)
-
-                    # Qualify and export leads from the unique set
-                    leads = filter_qualified(unique_in_search)
-                    if leads:
-                        export_qualified(leads)
-                        total_leads += len(leads)
-
-                    progress.mark_completed(city, category)
-                    clear_checkpoint(city, category)
-
-                    logger.info(
-                        f"  {pair_label} Done: {len(businesses)} found, "
-                        f"{len(unique_in_search)} unique, {len(leads)} qualified leads"
-                    )
-
-                    # Refresh browser context periodically
-                    if detail_visits >= settings.CONTEXT_REFRESH_EVERY:
-                        logger.info("Refreshing browser context...")
-                        page = await browser.new_context()
-                        detail_visits = 0
-
-                    # Delay between searches
-                    await search_delay()
-
-                except Exception as e:
-                    logger.error(f"  {pair_label} FAILED: {e}")
-                    progress.mark_failed(city, category)
-                    # Try to recover
-                    try:
-                        page = await browser.new_context()
-                        detail_visits = 0
-                    except Exception:
-                        pass
-                    continue
-
-            # Longer break between cities
-            if metro_idx < len(metros) - 1:
-                logger.info(f"City break before next metro...")
-                await random_delay(settings.CITY_BREAK_MIN, settings.CITY_BREAK_MAX)
-
-    finally:
-        # Always save state on exit
-        dedup.save()
-        progress.save()
-        await browser.close()
-
-        # Final summary
-        stats = progress.stats
-        raw_count = get_csv_row_count(settings.LEADS_RAW_CSV)
-        qual_count = get_csv_row_count(settings.LEADS_QUALIFIED_CSV)
-
-        logger.info(f"\n{'='*60}")
-        logger.info("SCRAPER COMPLETE")
-        logger.info(f"{'='*60}")
-        logger.info(f"Searches completed: {stats['completed']}")
-        logger.info(f"Searches failed:    {stats['failed']}")
-        logger.info(f"Total businesses:   {raw_count}")
-        logger.info(f"Qualified leads:    {qual_count}")
-        logger.info(f"Dedup pool size:    {dedup.total_seen}")
-        logger.info(f"Output: {settings.LEADS_QUALIFIED_CSV}")
-        logger.info(f"{'='*60}")
-
-
-def main():
-    asyncio.run(run())
+        raise SystemExit(asyncio.run(run(args)))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/yellow]")
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

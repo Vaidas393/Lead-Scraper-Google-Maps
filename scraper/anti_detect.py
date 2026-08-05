@@ -1,20 +1,21 @@
 """Anti-detection utilities: random delays, mouse simulation, block detection."""
 
-import random
 import asyncio
 import logging
+import random
+
 from playwright.async_api import Page
 
 from config.settings import (
-    SCROLL_DELAY_MIN,
-    SCROLL_DELAY_MAX,
-    DETAIL_DELAY_MIN,
     DETAIL_DELAY_MAX,
-    SEARCH_DELAY_MIN,
-    SEARCH_DELAY_MAX,
-    IDLE_PAUSE_MIN,
-    IDLE_PAUSE_MAX,
+    DETAIL_DELAY_MIN,
     IDLE_PAUSE_EVERY,
+    IDLE_PAUSE_MAX,
+    IDLE_PAUSE_MIN,
+    SCROLL_DELAY_MAX,
+    SCROLL_DELAY_MIN,
+    SEARCH_DELAY_MAX,
+    SEARCH_DELAY_MIN,
 )
 from scraper.selectors import SELECTORS
 
@@ -27,8 +28,7 @@ _next_idle_at = random.randint(*IDLE_PAUSE_EVERY)
 
 async def random_delay(min_s: float, max_s: float):
     """Sleep for a random duration between min_s and max_s seconds."""
-    delay = random.uniform(min_s, max_s)
-    await asyncio.sleep(delay)
+    await asyncio.sleep(random.uniform(min_s, max_s))
 
 
 async def scroll_delay():
@@ -55,37 +55,53 @@ async def maybe_idle_pause():
         _next_idle_at = random.randint(*IDLE_PAUSE_EVERY)
 
 
-async def human_click(page: Page, locator):
-    """Move mouse near the element then click, simulating human behavior."""
+async def human_click(page: Page, locator) -> bool:
+    """Move the mouse near the element, then click it.
+
+    Escalates through genuinely different strategies. The previous version's
+    fallback re-issued the identical ``locator.click()`` that had just failed,
+    so it could only ever fail the same way.
+    """
     try:
         box = await locator.bounding_box()
         if box:
-            # Move to a random point near the target first
-            offset_x = random.randint(-5, 5)
-            offset_y = random.randint(-5, 5)
-            target_x = box["x"] + box["width"] / 2 + offset_x
-            target_y = box["y"] + box["height"] / 2 + offset_y
+            target_x = box["x"] + box["width"] / 2 + random.randint(-5, 5)
+            target_y = box["y"] + box["height"] / 2 + random.randint(-5, 5)
             await page.mouse.move(target_x, target_y)
             await asyncio.sleep(random.uniform(0.1, 0.3))
-        await locator.click()
-    except Exception:
-        # Fallback: direct click
-        await locator.click()
+        await locator.click(timeout=5000)
+        return True
+    except Exception as exc:
+        logger.debug(f"Normal click failed: {exc}")
+
+    # The element may be scrolled out of the virtualized feed.
+    try:
+        await locator.scroll_into_view_if_needed(timeout=3000)
+        await locator.click(timeout=5000, force=True)
+        return True
+    except Exception as exc:
+        logger.debug(f"Forced click failed: {exc}")
+
+    # Last resort: dispatch the event directly, bypassing hit-testing.
+    try:
+        await locator.evaluate("el => el.click()")
+        return True
+    except Exception as exc:
+        logger.debug(f"JS click failed: {exc}")
+
+    return False
 
 
-async def is_blocked(page: Page) -> bool:
-    """Check if Google has shown a CAPTCHA or block page."""
-    # Check for CAPTCHA iframe
+async def is_blocked(page: Page, timeout_ms: int = 1000) -> bool:
+    """Check whether Google has shown a CAPTCHA or block page."""
     for sel in SELECTORS["captcha_indicator"]:
         try:
-            el = page.locator(sel).first
-            if await el.is_visible(timeout=1000):
+            if await page.locator(sel).first.is_visible(timeout=timeout_ms):
                 logger.warning("CAPTCHA detected!")
                 return True
         except Exception:
             pass
 
-    # Check page text for block indicators
     try:
         body_text = await page.inner_text("body", timeout=2000)
         body_lower = body_text.lower()
@@ -97,3 +113,13 @@ async def is_blocked(page: Page) -> bool:
         pass
 
     return False
+
+
+def block_backoff_seconds(consecutive_blocks: int, base: float) -> float:
+    """Escalating pause after repeated blocks.
+
+    A flat sleep on the same IP is not a strategy; each additional block
+    doubles the wait, capped at an hour.
+    """
+    multiplier = 2 ** max(0, consecutive_blocks - 1)
+    return min(base * multiplier, 3600.0)

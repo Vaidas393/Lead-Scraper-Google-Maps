@@ -22,6 +22,7 @@ env/
 # Scraper output (contains lead data — do not commit)
 output/
 results/
+out_*/
 
 # Playwright browser binaries
 playwright-browsers/
