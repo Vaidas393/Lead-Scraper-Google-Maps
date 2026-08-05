@@ -1,191 +1,414 @@
+<div align="center">
+
 # Google Maps Lead Scraper
 
-An async Playwright scraper that pulls outreach-ready business leads out of Google Maps. Point it at **any city or area in the world**, choose how deep to dig, and watch it run in a live terminal dashboard.
+### Find local businesses that need a website.
 
-## Why depth matters
+An async, resumable Playwright scraper that turns Google Maps results into
+outreach-ready CSV and Excel lead lists — with a guided setup wizard and a live
+terminal dashboard.
 
-Google Maps returns **at most ~120 results per search**. That cap is the single biggest limit on how many leads you can get, and the only way around it is to issue more, narrower searches. This scraper gives you three strategies, chosen per run:
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Playwright](https://img.shields.io/badge/Playwright-Chromium-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/python/)
+[![Tests](https://img.shields.io/badge/tests-258%20passing-22c55e)](#testing)
+[![License: MIT](https://img.shields.io/badge/license-MIT-0ea5e9)](LICENSE)
 
-| Depth | What it does | Searches per category | When to use |
-|---|---|---|---|
-| **City** | One search for the whole city | 1 | Quick sampling, small towns |
-| **Areas** | Discovers the city's suburbs/neighbourhoods/postal areas from Google Maps itself, then searches each one | 1 per sub-area (default 12) | **Default choice.** Typically 5-15x more results |
-| **Grid** | Tiles the map with lat/lng cells and pins each search to a cell | 1 per tile (e.g. 9 for 3x3) | Maximum coverage, dense metros |
+**No API key · Any city worldwide · CSV + Excel · Crash-safe resume**
 
-Sub-areas are derived from Maps itself — one cheap probe search, then the localities and postal codes are ranked out of the resulting addresses. No geocoding API, no key, works in any country.
+</div>
 
-## Lead profiles
+![Interactive setup wizard](docs/assets/setup-wizard.svg)
 
-What counts as a "qualified lead" is chosen at setup:
+## What it does
 
-- **`no_website`** *(default)* — businesses with no website at all. Classic "let me build you a site" outreach.
-- **`no_email`** — businesses that have a site but no findable email. Crawls the site (plus `/contact`, `/about`) for contact details and social profiles.
-- **`all`** — qualify nothing, export everything, filter later.
+Give the scraper a place and one or more business categories. It searches
+Google Maps, opens each listing, extracts useful business data, removes
+duplicates, and separates qualified leads from the full dataset.
 
-Shared thresholds (configurable): minimum rating, minimum review count, and whether a phone number is required. A missing rating or review count is *not* disqualifying — plenty of real small businesses have neither.
+The default lead profile is `no_website`: businesses whose Maps listing has no
+website, subject to your phone, rating, and review thresholds.
 
-## Setup
-
-Requires Python 3.10+.
-
-```bash
-python -m venv .venv
+```mermaid
+flowchart LR
+    A[Choose city and categories] --> B{Search depth}
+    B -->|City| C[One search per category]
+    B -->|Areas| D[Discover neighbourhoods]
+    B -->|Grid| E[Tile map into coordinates]
+    C --> F[Scrape Google Maps listings]
+    D --> F
+    E --> F
+    F --> G[Normalize and deduplicate]
+    G --> H{Lead profile}
+    H -->|No website| I[Qualified leads]
+    H -->|No email| J[Crawl business websites]
+    H -->|All| K[Everything]
+    I --> L[CSV + XLSX]
+    J --> L
+    K --> L
 ```
 
+### Why search depth matters
+
+Google Maps exposes only a limited result set for one query. More focused
+queries uncover businesses that a single city-wide search misses.
+
+| Depth | Searches per category | Best for | Trade-off |
+|---|---:|---|---|
+| `city` | 1 | Quick test or small town | Fastest, shallowest coverage |
+| `areas` | Up to 12 by default | Most real runs | Good coverage without manual coordinates |
+| `grid` | Rows × columns | Dense metros and maximum coverage | Longest runtime, highest block risk |
+
+`areas` is the recommended default. It probes Maps for localities and postal
+areas, ranks them, then searches each area separately. `grid` divides a
+coordinate span into cells; a `3x3` grid creates nine searches per category.
+
+## See it run
+
+![Live scraping dashboard](docs/assets/live-dashboard.svg)
+
+The dashboard shows overall searches, current result progress, ETA, unique and
+qualified lead counts, blocks, and recent activity. Docker and non-interactive
+terminals automatically fall back to clean text logs.
+
+## Quick start
+
+### 1. Create an environment
+
+Python 3.10–3.13 recommended. Playwright 1.49 does not support Python 3.14.
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.12 -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
-```bash
-pip install -r requirements.txt
-```
+### 2. Install dependencies
 
 ```bash
+python -m pip install -r requirements.txt
 playwright install chromium
 ```
 
-## Running
-
-Just run it — you get an interactive wizard, then a live dashboard:
+### 3. Launch the wizard
 
 ```bash
 python main.py
 ```
 
-The wizard asks for the place, depth, categories, lead profile, thresholds, headless mode and proxy, then shows a summary with the search count and a time estimate before anything starts.
+The wizard asks for target, depth, categories, lead profile, thresholds,
+browser mode, concurrency, and optional proxy. It shows estimated search count
+and runtime before starting.
 
-### Check it still works
+## Find businesses without websites
 
-Google rotates its obfuscated CSS classes on its own schedule. Before a long run:
+This is the main workflow and the default profile:
+
+```bash
+python main.py \
+  --city "Lahore" \
+  --depth areas \
+  --categories plumbers electricians dentists \
+  --profile no_website
+```
+
+For a safe first run:
+
+```bash
+python main.py \
+  --city "Lahore" \
+  --depth city \
+  --categories plumbers \
+  --profile no_website \
+  --max-results 20
+```
+
+A `no_website` lead qualifies when:
+
+- its Google Maps listing has no website;
+- it has a phone number by default;
+- known rating is at least `3.0` by default;
+- known review count is at least `5` by default.
+
+Missing ratings or review counts do not disqualify a business. Include leads
+without phone numbers with `--no-require-phone`.
+
+## Interactive journey
+
+```mermaid
+flowchart TD
+    Start([python main.py]) --> Target{Choose target}
+    Target --> Free[Type any city or area]
+    Target --> Preset[Choose US metro preset]
+    Free --> Depth{Choose depth}
+    Preset --> Depth
+    Depth --> Categories[Select categories]
+    Categories --> Profile{Choose lead profile}
+    Profile --> Thresholds[Keep or adjust thresholds]
+    Thresholds --> Scope[Set areas, grid, or result cap]
+    Scope --> Browser[Visible or headless browser]
+    Browser --> Proxy[Optional proxy and concurrency]
+    Proxy --> Review[Review run plan and estimate]
+    Review -->|Confirm| Run[Start live dashboard]
+    Review -->|Cancel| Stop([Exit safely])
+```
+
+## Useful recipes
+
+### Search discovered neighbourhoods
+
+```bash
+python main.py \
+  --city "Austin TX" \
+  --depth areas \
+  --max-areas 8 \
+  --categories roofing landscaping \
+  --profile no_website
+```
+
+### Search a coordinate grid
+
+```bash
+python main.py \
+  --city "Miami FL" \
+  --depth grid \
+  --grid 3x3 \
+  --grid-span 20 \
+  --categories dentists \
+  --profile no_website
+```
+
+### Export every business
+
+```bash
+python main.py \
+  --city "Camden, London" \
+  --depth city \
+  --categories bakery florist \
+  --profile all
+```
+
+### Find sites without a discoverable email
+
+```bash
+python main.py \
+  --city "Houston TX" \
+  --depth areas \
+  --categories accountants lawyers \
+  --profile no_email
+```
+
+This profile visits business websites and checks the homepage plus common
+contact/about pages for emails and social links, so it runs more slowly.
+
+### Run without UI
+
+```bash
+python main.py \
+  --city "Lahore" \
+  --depth areas \
+  --categories plumbers \
+  --profile no_website \
+  --headless --no-tui -y
+```
+
+## Output
+
+Runs write to `output/` unless `--output DIR` is supplied.
+
+| File | Purpose |
+|---|---|
+| `leads_raw.csv` | Every unique business found |
+| `leads_qualified.csv` | Businesses matching selected lead profile |
+| `leads.xlsx` | Raw and qualified leads as separate worksheets |
+| `progress.json` | Completed search units for resume |
+| `seen_keys.json` | Persistent deduplication pool |
+| `checkpoints/` | Within-search recovery state |
+| `scraper.log` | Full debug log |
+
+Exported fields include name, category, address, phone, email, rating, reviews,
+website state and URL, Facebook, Instagram, LinkedIn, claimed status, hours,
+price level, coordinates, Plus Code, Place ID, Maps URL, target area, original
+query, and scrape timestamp.
+
+## Resume and recovery
+
+Every run is resumable at two levels:
+
+1. Completed searches are skipped when the same run starts again.
+2. Active searches checkpoint scraped results, so a crash near result 100 does
+   not restart that search from zero.
+
+State uses atomic writes. Re-run the same command after a crash or `Ctrl-C`.
+Use `--no-resume` only when a completely fresh scrape is intended.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Planned
+    Planned --> Searching
+    Searching --> Checkpointed: periodic save
+    Checkpointed --> Searching: continue
+    Searching --> Completed
+    Searching --> Interrupted: crash / Ctrl-C / block threshold
+    Interrupted --> Checkpointed: restart same command
+    Completed --> Exported
+    Exported --> [*]
+```
+
+## CLI reference
+
+<details>
+<summary><strong>Target and search planning</strong></summary>
+
+| Option | Description |
+|---|---|
+| `--city TEXT`, `--area TEXT` | Any place Google Maps understands |
+| `--metro NAME` | Built-in US metro preset |
+| `--categories CAT ...` | One or more business categories |
+| `--depth city\|areas\|grid` | Search coverage strategy |
+| `--max-areas N` | Maximum discovered sub-areas |
+| `--grid RxC` | Grid dimensions, such as `3x3` |
+| `--grid-span KM` | Approximate grid width in kilometres |
+| `--max-results N` | Maximum listings per search |
+
+</details>
+
+<details>
+<summary><strong>Lead qualification</strong></summary>
+
+| Option | Description |
+|---|---|
+| `--profile no_website\|no_email\|all` | Qualified lead definition |
+| `--min-rating FLOAT` | Minimum known rating |
+| `--min-reviews INT` | Minimum known review count |
+| `--no-require-phone` | Permit leads without phone numbers |
+| `--no-website-crawl` | Skip email and social discovery on websites |
+
+</details>
+
+<details>
+<summary><strong>Runtime and tools</strong></summary>
+
+| Option | Description |
+|---|---|
+| `--headless` | Hide browser window |
+| `--proxy URL` | Use HTTP proxy |
+| `--concurrency N` | Run multiple browsers; higher block risk |
+| `--output DIR` | Change output directory |
+| `--no-resume` | Ignore saved progress |
+| `--no-tui` | Use plain logs instead of dashboard |
+| `-y`, `--yes` | Skip wizard and confirmation |
+| `--doctor` | Live-check Google Maps selectors and blocking |
+| `--list-categories` | Print built-in categories |
+
+</details>
+
+Every setting also supports a `SCRAPER_` environment variable. Examples:
+
+```bash
+export SCRAPER_MIN_RATING=4.0
+export SCRAPER_HEADLESS=true
+export SCRAPER_OUTPUT_DIR=./my-leads
+export SCRAPER_SEARCH_DELAY_MIN=8
+```
+
+See [`config/settings.py`](config/settings.py) for all tunables.
+
+## Selector doctor
+
+Google changes Maps markup. Check selectors before a long run:
 
 ```bash
 python main.py --doctor
 ```
 
-This opens one live search and reports which selectors still match. It distinguishes **"the markup changed"** from **"you're being blocked"** — two problems that look identical from an empty CSV but need completely different fixes.
+Doctor opens one live search and distinguishes selector drift from traffic
+blocking — different problems requiring different fixes.
 
-### Non-interactive examples
-
-```bash
-python main.py --city "Austin TX" --depth areas --categories plumbers electricians
-```
+## Docker
 
 ```bash
-python main.py --city Lahore --depth areas --categories dentists --headless
+docker compose up --build
 ```
+
+Default Docker target comes from `docker-compose.yml`. Override it for one run:
 
 ```bash
-python main.py --city "Miami FL" --depth grid --grid 4x4 --grid-span 25
+docker compose run --rm scraper \
+  python main.py --city "Austin TX" --depth areas \
+  --categories plumbers --profile no_website --headless -y
 ```
 
-```bash
-python main.py --metro Houston --profile no_email --min-rating 4.0
+Results appear in `./results` on the host. Docker uses plain logs because no
+interactive terminal is attached.
+
+## Staying below block thresholds
+
+The scraper randomizes viewport, Chromium user agent, delays, idle pauses,
+timezone, and browser contexts. It detects blocks during searches, retries with
+exponential backoff, rotates browser identity, and stops after repeated blocks.
+
+These measures reduce risk; they cannot guarantee uninterrupted scraping.
+
+- Start with visible browser mode and concurrency `1`.
+- Keep default randomized delays for first run.
+- Use a reputable proxy for large workloads.
+- Increase `SCRAPER_SEARCH_DELAY_MIN` after blocks.
+- Prefer `areas` before escalating to a large grid.
+- Avoid running multiple independent scrapes from same IP.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    CLI[main.py<br/>CLI + wizard] --> Config[RunConfig]
+    Config --> Planner[geo/<br/>resolve + areas + grid]
+    Planner --> Runner[runner.py<br/>orchestration]
+    Runner --> Browser[scraper/<br/>Playwright + extraction]
+    Browser --> Maps[(Google Maps)]
+    Browser --> Normalize[data/<br/>normalize + deduplicate]
+    Normalize --> Qualify[data/qualifier.py]
+    Qualify --> Export[data/exporter.py<br/>CSV + XLSX]
+    Runner <--> State[persistence/<br/>progress + checkpoints]
+    Runner --> UI[ui/<br/>dashboard or logs]
 ```
 
-### CLI options
-
-**Target**
-- `--city TEXT` (alias `--area`) — any place Google Maps understands
-- `--metro NAME` — a built-in US metro preset, e.g. `--metro Houston`
-- `--categories CAT [CAT ...]` — defaults to the built-in list (`--list-categories`)
-- `--depth {city,areas,grid}`
-
-**Lead quality**
-- `--profile {no_website,no_email,all}`
-- `--min-rating FLOAT`, `--min-reviews INT`, `--no-require-phone`
-- `--no-website-crawl` — never open business websites (much faster; skips email/social discovery)
-
-**Scope**
-- `--max-areas N` — sub-areas to search at `--depth areas`
-- `--grid RxC`, `--grid-span KM` — grid shape and coverage
-- `--max-results N` — cap results per search
-
-**Runtime**
-- `--headless`, `--proxy URL`, `--output DIR`
-- `--concurrency N` — run N browsers in parallel (default 1). Faster, but N times the request rate and a correspondingly higher block risk.
-- `--no-resume` — ignore saved progress and re-scrape
-- `--no-tui` — plain logs instead of the dashboard
-- `-y` / `--yes` — skip the wizard
-
-**Tools**
-- `--doctor`, `--list-categories`
-
-Every setting also has a `SCRAPER_`-prefixed environment variable (`SCRAPER_MIN_RATING`, `SCRAPER_HEADLESS`, `SCRAPER_PROXY`, `SCRAPER_OUTPUT_DIR`, delay ranges, timeouts, ...). See `config/settings.py`.
-
-## Output
-
-Written to `output/` (or `--output`):
-
-- **`leads_raw.csv`** — every unique business found
-- **`leads_qualified.csv`** — only those matching the active lead profile
-- **`leads.xlsx`** — both of the above as a two-sheet workbook
-- `progress.json`, `seen_keys.json`, `checkpoints/` — resume state
-- `scraper.log` — full DEBUG log
-
-Columns: Name, Category, Address, Phone, Business Email, Rating, Reviews, Has Website, Website URL, Facebook, Instagram, LinkedIn, Claimed, Hours, Price Level, Latitude, Longitude, Plus Code, Place ID, Google Maps URL, City, Area, Metro Area, State, Search Query, Scraped At.
-
-If an existing CSV has an older column set, it is archived as `leads_raw.legacy-<timestamp>.csv` rather than being appended to with mismatched columns.
-
-## Resuming
-
-Runs are resumable at two levels:
-
-- **Per search** — completed searches are skipped on the next run.
-- **Within a search** — a checkpoint records which results have been scraped, so a crash 100 businesses in costs one result, not all of them.
-
-State is written atomically (temp file + rename) and flushed periodically, so a hard kill, Ctrl-C or `docker stop` cannot corrupt it or lose the run's dedup pool. Re-run the same command to continue; pass `--no-resume` to start over.
-
-Deduplication uses Google's own place ID when available (exact), falling back to a normalized name + phone/address composite that treats "Joe's Pizza LLC" / "Joes Pizza" and "123 Main St" / "123 Main Street" as the same business.
-
-## Anti-blocking
-
-Included: stealth patches, randomized viewport and Chromium user agent, a timezone matched to the region being scraped, randomized delays and idle pauses, periodic browser-context rotation, retries with exponential backoff, block detection **during** a search as well as before it, escalating backoff on repeated blocks, and an abort threshold so a blocked run stops rather than hammering the same IP.
-
-Proxy support is optional (`--proxy` or `SCRAPER_PROXY`) but strongly recommended for large runs. On a block the run backs off with escalating pauses, rotates browser identity and retries the search once; after `SCRAPER_MAX_CONSECUTIVE_BLOCKS` (default 4) it stops rather than keep hammering the same IP.
-
-`--concurrency N` runs N independent browsers over the search queue. It is genuinely faster, but it multiplies your request rate by N — leave it at 1 unless you are using proxies.
-
-**None of this is a guarantee.** If you get blocked, slow the delays down (`SCRAPER_SEARCH_DELAY_MIN`), run headful, and use a proxy.
-
-## Project structure
-
-```
-main.py           Entry point: arg parsing, wizard, summary
-runner.py         Run orchestration, resilience, resume
-reporting.py      Run stats + the reporter interface
-config/           Settings, enums, per-run config, output paths, presets
-geo/              Target resolution, sub-area discovery, grid tiling, planning
-scraper/          Browser, selectors, extraction, scrolling, retries, doctor
-data/             Models, normalization, dedup, qualification, export
-persistence/      Atomic JSON, progress, checkpoints
-ui/               Wizard and live dashboard
-tests/            Offline unit tests
+```text
+main.py           CLI, wizard lifecycle, run summary
+runner.py         Search orchestration, retries, resume
+reporting.py      Statistics and reporter interface
+config/           Settings, enums, presets, run config
+geo/              Place resolution, areas, grid, plan
+scraper/          Browser, Maps extraction, selectors
+data/             Models, normalization, qualification, export
+persistence/      Atomic progress and checkpoints
+ui/               Interactive wizard and live dashboard
+tests/            Offline unit and integration tests
 ```
 
-## Tests
+## Testing
+
+Tests are fully offline:
 
 ```bash
 python -m pytest
 ```
 
-The suite is fully offline — parsers, normalization, dedup keys, grid maths, area ranking, lead profiles, CLI parsing, retry semantics and export behaviour. It does not touch the network. For a live check, use `--doctor`.
+Current suite covers CLI parsing, wizard lifecycle, selector contracts,
+retries, extraction parsers, normalization, deduplication, lead profiles,
+geography, persistence, export, and runner recovery.
 
-## Docker
+## Responsible use
 
-```bash
-docker compose up
-```
+Use this project responsibly. Review Google Maps terms and applicable privacy,
+marketing, and data-protection laws before collecting or contacting businesses.
+Respect opt-outs and avoid abusive request rates or unsolicited bulk outreach.
 
-There is no TTY in the container, so the dashboard automatically falls back to plain logs. Set your target via environment or override the command:
+## License
 
-```bash
-docker compose run --rm scraper python main.py --city "Austin TX" --depth areas -y
-```
-
-Results land in `./results` on the host.
-
-## Notes
-
-- Google Maps markup changes over time. All selectors live in `scraper/selectors.py`, every lookup walks a fallback chain, and semantic attributes (`role`, `aria-label`, `data-item-id`) are preferred over obfuscated CSS classes. `--doctor` tells you within seconds when something breaks.
-- Sponsored placements are filtered out of the results feed — an ad is not a lead.
-- Use responsibly and ensure compliance with applicable laws and platform terms in your region.
+Released under the [MIT License](LICENSE).
