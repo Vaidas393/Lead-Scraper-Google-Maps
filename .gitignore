@@ -27,6 +27,7 @@ out_*/
 # Playwright browser binaries
 playwright-browsers/
 .playwright/
+.playwright-browsers/
 
 # IDE
 .vscode/

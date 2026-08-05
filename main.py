@@ -244,7 +244,30 @@ def print_summary(summary: dict, aborted: str | None):
         console.print("[dim]Progress was saved — re-run the same command to resume.[/dim]")
 
 
-async def run(args) -> int:
+def prepare_config(args) -> tuple[RunConfig | None, int | None]:
+    """Build config and run terminal prompts before asyncio owns the thread."""
+    cfg = config_from_args(args)
+
+    wants_wizard = not cfg.target_input and not args.yes and is_interactive()
+    if wants_wizard:
+        from ui.wizard import WizardCancelled, run_wizard
+        try:
+            cfg = run_wizard(cfg)
+        except (WizardCancelled, KeyboardInterrupt):
+            console.print("[yellow]Cancelled.[/yellow]")
+            return None, 130
+
+    if not cfg.target_input:
+        console.print(
+            "[red]No target specified.[/red] Pass [bold]--city \"Austin TX\"[/bold] "
+            "(or --metro Houston), or run without [bold]-y[/bold] for the setup wizard."
+        )
+        return None, 2
+
+    return cfg, None
+
+
+async def run(args, cfg: RunConfig | None = None) -> int:
     """Async half of the entry point. Arg parsing happens before the loop
     starts, so argparse's SystemExit never has to unwind through asyncio."""
     if args.doctor:
@@ -253,24 +276,11 @@ async def run(args) -> int:
         ok = await run_doctor(headless=args.headless)
         return 0 if ok else 1
 
-    cfg = config_from_args(args)
-
-    # The wizard runs when the user gave no target and we have a real terminal.
-    wants_wizard = not cfg.target_input and not args.yes and is_interactive()
-    if wants_wizard:
-        from ui.wizard import WizardCancelled, run_wizard
-        try:
-            cfg = run_wizard(cfg)
-        except (WizardCancelled, KeyboardInterrupt):
-            console.print("[yellow]Cancelled.[/yellow]")
-            return 130
-
-    if not cfg.target_input:
-        console.print(
-            "[red]No target specified.[/red] Pass [bold]--city \"Austin TX\"[/bold] "
-            "(or --metro Houston), or run without [bold]-y[/bold] for the setup wizard."
-        )
-        return 2
+    if cfg is None:
+        cfg, exit_code = prepare_config(args)
+        if exit_code is not None:
+            return exit_code
+        assert cfg is not None
 
     reporter = make_reporter(cfg.tui)
     uses_dashboard = reporter.__class__.__name__ == "DashboardReporter"
@@ -296,7 +306,12 @@ def main(argv=None):
         raise SystemExit(0)
 
     try:
-        raise SystemExit(asyncio.run(run(args)))
+        cfg = None
+        if not args.doctor:
+            cfg, exit_code = prepare_config(args)
+            if exit_code is not None:
+                raise SystemExit(exit_code)
+        raise SystemExit(asyncio.run(run(args, cfg)))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         raise SystemExit(130)

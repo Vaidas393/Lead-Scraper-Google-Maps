@@ -3,13 +3,29 @@ import asyncio
 import pytest
 
 from config.enums import Depth, LeadProfile
-from main import _parse_grid, _resolve_metro, config_from_args, parse_args
+from main import _parse_grid, _resolve_metro, config_from_args, parse_args, prepare_config
 from reporting import RunStats, format_duration
 from scraper.retry import RetryExhausted, retry_async
 from scraper.selectors import CRITICAL_SELECTOR_KEYS, SELECTORS
 
 
 class TestCli:
+    def test_prepare_config_runs_wizard_without_asyncio_loop(self, monkeypatch):
+        args = parse_args([])
+        monkeypatch.setattr("main.is_interactive", lambda: True)
+
+        def fake_wizard(cfg):
+            with pytest.raises(RuntimeError, match="no running event loop"):
+                asyncio.get_running_loop()
+            cfg.target_input = "Lahore"
+            return cfg
+
+        monkeypatch.setattr("ui.wizard.run_wizard", fake_wizard)
+        cfg, exit_code = prepare_config(args)
+
+        assert exit_code is None
+        assert cfg.target_input == "Lahore"
+
     def test_city_and_categories(self):
         cfg = config_from_args(parse_args(["--city", "Austin TX", "--categories", "plumbers", "dentists"]))
         assert cfg.target_input == "Austin TX"
