@@ -31,4 +31,5 @@ CATEGORIES = [
     "pest control",
     "printing service",
     "tattoo shop",
+    "tree services",
 ]

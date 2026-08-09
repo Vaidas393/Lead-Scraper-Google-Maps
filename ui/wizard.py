@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # Rough per-unit cost used only to give the user a sense of scale before they
 # commit to a multi-hour run.
 SECONDS_PER_UNIT_ESTIMATE = 6.5 * 60
+CUSTOM_CATEGORY = "__custom_category__"
 
 
 class WizardCancelled(Exception):
@@ -84,15 +85,24 @@ def _ask_depth() -> Depth:
 
 def _ask_categories() -> list[str]:
     choices = [Choice(c, value=c) for c in CATEGORIES]
+    choices.append(Choice("Enter a custom keyword...", value=CUSTOM_CATEGORY))
     while True:
         selected = _ask(questionary.checkbox(
             "Which business categories?",
             choices=choices,
             instruction="(space to toggle, enter to confirm)",
         ))
+        if CUSTOM_CATEGORY in selected:
+            selected.remove(CUSTOM_CATEGORY)
+            custom = _ask(questionary.text(
+                "Custom business keyword:",
+                instruction="e.g. 'solar panel installer'",
+            )).strip()
+            if custom and custom not in selected:
+                selected.append(custom)
         if selected:
             return selected
-        console.print("[yellow]Pick at least one category.[/yellow]")
+        console.print("[yellow]Pick a category or enter a custom keyword.[/yellow]")
 
 
 def _ask_profile() -> LeadProfile:

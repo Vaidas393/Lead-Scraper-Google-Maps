@@ -10,6 +10,11 @@ from scraper.selectors import CRITICAL_SELECTOR_KEYS, SELECTORS
 
 
 class TestCli:
+    def test_tree_services_is_a_builtin_category(self):
+        from config.categories import CATEGORIES
+
+        assert "tree services" in CATEGORIES
+
     def test_prepare_config_runs_wizard_without_asyncio_loop(self, monkeypatch):
         args = parse_args([])
         monkeypatch.setattr("main.is_interactive", lambda: True)

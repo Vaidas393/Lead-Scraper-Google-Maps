@@ -34,6 +34,13 @@ playwright-browsers/
 .idea/
 *.iml
 
+# Local AI assistant configuration
+.agents/
+.claude/
+.codex/
+AGENTS.md
+CLAUDE.md
+
 # OS
 .DS_Store
 Thumbs.db

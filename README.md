@@ -101,7 +101,7 @@ playwright install chromium
 python main.py
 ```
 
-The wizard asks for target, depth, categories, lead profile, thresholds,
+The wizard asks for target, depth, categories (including any custom keyword), lead profile, thresholds,
 browser mode, concurrency, and optional proxy. It shows estimated search count
 and runtime before starting.
 
