@@ -8,6 +8,7 @@ import html
 import ipaddress
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import re
 import sqlite3
 import sys
@@ -74,13 +75,16 @@ SPECIALTY_LIMIT_COUNT = options.pilot_specialties
 EXPORT_BATCH_SIZE = 10
 SCROLL_ROUNDS = 8 if COUNTRY == "scotland" else 2
 USER_AGENT = "PublicBusinessContacts/1.0 (polite contact-page crawler)"
-logging.basicConfig(filename=RESULTS / "fast-leads.log", level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
+logging.basicConfig(handlers=[RotatingFileHandler(RESULTS / "fast-leads.log", maxBytes=10_000_000,
+                                                   backupCount=5, encoding="utf-8")], level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 conn = sqlite3.connect(DB)
 conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("CREATE TABLE IF NOT EXISTS queries (city TEXT, specialty TEXT, done INTEGER DEFAULT 0, PRIMARY KEY(city,specialty))")
 conn.execute("CREATE TABLE IF NOT EXISTS businesses (id TEXT PRIMARY KEY, name TEXT, website TEXT, city TEXT)")
+conn.execute("CREATE TABLE IF NOT EXISTS checked_businesses (id TEXT PRIMARY KEY)")
 conn.execute("CREATE TABLE IF NOT EXISTS emails (email TEXT PRIMARY KEY, name TEXT, mx_ok INTEGER, source TEXT)")
 conn.execute("CREATE TABLE IF NOT EXISTS email_categories (email TEXT, name TEXT, specialty TEXT, PRIMARY KEY(email,specialty))")
 conn.commit()
@@ -195,6 +199,13 @@ async def robots_for(origin: str):
         except Exception:
             robots_cache[origin] = None
     return robots_cache[origin]
+
+
+async def checked_crawl(item):
+    await crawl_business(item)
+    business_id = item["name"].casefold() + "|" + item["website"].casefold()
+    conn.execute("INSERT OR IGNORE INTO checked_businesses(id) VALUES(?)", (business_id,))
+    conn.commit()
 
 
 async def crawl_business(item):
@@ -365,11 +376,11 @@ async def run():
                     if LEAD_LIMIT is not None and conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0] >= LEAD_LIMIT:
                         break
                     item["specialty"] = specialty
-                    if conn.execute("SELECT 1 FROM businesses WHERE id=?", (item["name"].casefold()+"|"+item["website"].casefold(),)).fetchone():
+                    if conn.execute("SELECT 1 FROM checked_businesses WHERE id=?", (item["name"].casefold()+"|"+item["website"].casefold(),)).fetchone():
                         continue
                     conn.execute("INSERT OR IGNORE INTO businesses(id,name,website,city) VALUES(?,?,?,?)", (item["name"].casefold()+"|"+item["website"].casefold(), item["name"], item["website"], city))
                     conn.commit()
-                    pending_sites.add(asyncio.create_task(crawl_business(item)))
+                    pending_sites.add(asyncio.create_task(checked_crawl(item)))
                     if len(pending_sites) >= max(8, options.site_concurrency * 3):
                         done, pending_sites = await asyncio.wait(pending_sites, return_when=asyncio.FIRST_COMPLETED)
                         for task in done:
