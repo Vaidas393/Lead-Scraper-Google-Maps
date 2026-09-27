@@ -228,7 +228,8 @@ async def crawl_business(item):
         origin = f"{parsed.scheme}://{parsed.netloc}"
         robots = await robots_for(origin)
         paths = [website]
-        for page in ("/kontaktai", "/apie-mus", "/contact", "/contact-us", "/about"):
+        contact_paths = ("/kontaktai", "/apie-mus", "/contact", "/contact-us", "/about") if COUNTRY == "lithuania" else ("/contact", "/contact-us", "/about", "/about-us")
+        for page in contact_paths:
             paths.append(urljoin(origin, page))
         discovered = None
         async with site_sem:
@@ -392,7 +393,7 @@ async def run():
                 conn.commit()
                 business_count = conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
                 email_count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
-                logging.info("%s | %s | %d map businesses | %d MX-checked emails", city, specialty, business_count, email_count)
+                logging.info("%s | %s | %d map businesses | %d DNS-checked emails", place["query"] if isinstance(place, dict) else city, specialty, business_count, email_count)
                 if (LEAD_LIMIT is not None and email_count >= LEAD_LIMIT) or business_count >= MAX_BUSINESSES or email_count >= MAX_EMAILS:
                     logging.info("Requested lead limit reached; stopping after the test batch.")
                     return
