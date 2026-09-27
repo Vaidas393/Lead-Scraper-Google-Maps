@@ -13,6 +13,9 @@ import re
 import sqlite3
 import sys
 import signal
+import socket
+import os
+from campaign_storage import CampaignLock, export_country
 import time
 from contextlib import suppress
 from email.utils import parseaddr
@@ -40,6 +43,7 @@ def parse_options():
     parser.add_argument("--site-concurrency", type=int, default=8)
     parser.add_argument("--max-businesses", type=int, default=1000000)
     parser.add_argument("--max-emails", type=int, default=300000)
+    parser.add_argument("--export-only", action="store_true", help="Regenerate country CSVs from saved progress without scraping")
     parser.add_argument("--describe", action="store_true", help="Show campaign without starting or writing progress")
     return parser.parse_args()
 
@@ -49,14 +53,14 @@ if COUNTRY == "lithuania":
     PROFILE = {"country": "Lithuania", "gl": "lt", "locale": "lt-LT", "timezone": "Europe/Vilnius"}
     CITIES = json.loads((ROOT / "cities.json").read_text(encoding="utf-8-sig"))["cities"]
     SPECIALTIES_FILE = ROOT / "specialties.json"
-    OUT_DIR = ROOT.parent / "leads"
+    OUT_DIR = ROOT.parent / "leads" / COUNTRY
     RESULTS = ROOT / "results"
     STOP = ROOT / "STOP"
 else:
     PROFILE = json.loads((ROOT / "campaigns" / f"{COUNTRY}.json").read_text(encoding="utf-8"))
     CITIES = PROFILE["cities"]
     SPECIALTIES_FILE = ROOT / "campaigns" / "specialties-en.json"
-    OUT_DIR = ROOT.parent / f"leads-{COUNTRY}"
+    OUT_DIR = ROOT.parent / "leads" / COUNTRY
     RESULTS = ROOT / "results" / COUNTRY
     STOP = RESULTS / "STOP"
 SPECIALTIES = json.loads(SPECIALTIES_FILE.read_text(encoding="utf-8-sig"))["specialties"]
@@ -65,7 +69,7 @@ if options.describe:
                       "queries": len(CITIES)*len(SPECIALTIES), "output": str(OUT_DIR), "results": str(RESULTS)}))
     raise SystemExit(0)
 OUT = OUT_DIR / "all_leads.csv"
-BY_SPECIALTY = OUT_DIR
+BY_SPECIALTY = OUT_DIR / "categories"
 DB = RESULTS / "leads.sqlite3"
 RESULTS.mkdir(parents=True, exist_ok=True)
 MAX_BUSINESSES = options.max_businesses
@@ -80,11 +84,13 @@ logging.basicConfig(handlers=[RotatingFileHandler(RESULTS / "fast-leads.log", ma
                     format="%(asctime)s %(levelname)s %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+campaign_lock = CampaignLock(RESULTS / "campaign.lock")
 conn = sqlite3.connect(DB)
 conn.execute("PRAGMA journal_mode=WAL")
+conn.execute("PRAGMA synchronous=FULL")
 conn.execute("CREATE TABLE IF NOT EXISTS queries (city TEXT, specialty TEXT, done INTEGER DEFAULT 0, PRIMARY KEY(city,specialty))")
 conn.execute("CREATE TABLE IF NOT EXISTS businesses (id TEXT PRIMARY KEY, name TEXT, website TEXT, city TEXT)")
-conn.execute("CREATE TABLE IF NOT EXISTS checked_businesses (id TEXT PRIMARY KEY)")
+conn.execute("CREATE TABLE IF NOT EXISTS checked_business_categories (id TEXT, specialty TEXT, PRIMARY KEY(id,specialty))")
 conn.execute("CREATE TABLE IF NOT EXISTS emails (email TEXT PRIMARY KEY, name TEXT, mx_ok INTEGER, source TEXT)")
 conn.execute("CREATE TABLE IF NOT EXISTS email_categories (email TEXT, name TEXT, specialty TEXT, PRIMARY KEY(email,specialty))")
 conn.commit()
@@ -202,9 +208,9 @@ async def robots_for(origin: str):
 
 
 async def checked_crawl(item):
-    await crawl_business(item)
+    await asyncio.wait_for(crawl_business(item), timeout=120)
     business_id = item["name"].casefold() + "|" + item["website"].casefold()
-    conn.execute("INSERT OR IGNORE INTO checked_businesses(id) VALUES(?)", (business_id,))
+    conn.execute("INSERT OR IGNORE INTO checked_business_categories(id,specialty) VALUES(?,?)", (business_id,item["specialty"]))
     conn.commit()
 
 
@@ -283,34 +289,16 @@ async def save_email(email, name, source, specialty):
 
 
 def export_csv(changed_specialties=None, initialize_categories=False):
-    rows = conn.execute("SELECT name,email FROM emails ORDER BY name COLLATE NOCASE,email").fetchall()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    BY_SPECIALTY.mkdir(parents=True, exist_ok=True)
-    temp = OUT.with_suffix(".csv.tmp")
-    with temp.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["Pavadinimas", "El. pa" + chr(0x0161) + "tas"])
-        writer.writerows(rows)
-    temp.replace(OUT)
-    grouped = conn.execute("SELECT specialty,name,email FROM email_categories ORDER BY specialty COLLATE NOCASE,name COLLATE NOCASE,email").fetchall()
-    groups = {}
-    for specialty, name, email in grouped:
-        groups.setdefault(specialty, []).append((name, email))
-    if initialize_categories:
-        specialties = sorted(groups, key=str.casefold)
-    else:
-        specialties = list(changed_specialties or [])
-    for specialty in specialties:
-        group = groups.get(specialty, [])
-        slug = re.sub(r"[^a-z0-9]+", "-", __import__("unicodedata").normalize("NFKD", specialty.casefold()).encode("ascii", "ignore").decode()).strip("-") or "specialybe"
-        path = BY_SPECIALTY / f"{slug}.csv"
-        tmp = path.with_suffix(".csv.tmp")
-        with tmp.open("w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["Pavadinimas", "El. pa" + chr(0x0161) + "tas"])
-            writer.writerows(group)
-        tmp.replace(path)
-    return len(rows)
+    return export_country(conn, OUT_DIR, None if initialize_categories else (changed_specialties or []))
+
+
+def watchdog_ping():
+    address = os.environ.get("NOTIFY_SOCKET")
+    if address:
+        if address.startswith("@"):
+            address = "\0" + address[1:]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.sendto(b"WATCHDOG=1", address)
 
 
 async def maps_records(page, city, specialty):
@@ -344,7 +332,8 @@ async def run():
     business_count = conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
     email_count = export_csv(initialize_categories=True)
     browser = BrowserManager(headless=True, locale=PROFILE["locale"], timezone_id=PROFILE["timezone"])
-    page = await browser.start()
+    page = await asyncio.wait_for(browser.start(), timeout=90)
+    watchdog_ping()
     pending_sites: set[asyncio.Task] = set()
     logging.info("START cities=%d specialties=%d businesses=%d emails=%d", len(cities), len(specialties), business_count, email_count)
     try:
@@ -368,16 +357,16 @@ async def run():
                         failed_streak += 1
                         logging.error("Skipping failed search for now; it remains resumable: %s | %s", city, specialty)
                         if failed_streak >= 4:
-                            logging.warning("Four Maps searches failed in a row; cooling down briefly before continuing.")
-                            await page.wait_for_timeout(10000)
-                            failed_streak = 0
+                            raise RuntimeError("Four consecutive Maps failures; restart the browser and retry unfinished queries")
                         continue
                 failed_streak = 0
+                query_complete = True
                 for item in found:
                     if LEAD_LIMIT is not None and conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0] >= LEAD_LIMIT:
+                        query_complete = False
                         break
                     item["specialty"] = specialty
-                    if conn.execute("SELECT 1 FROM checked_businesses WHERE id=?", (item["name"].casefold()+"|"+item["website"].casefold(),)).fetchone():
+                    if conn.execute("SELECT 1 FROM checked_business_categories WHERE id=? AND specialty=?", (item["name"].casefold()+"|"+item["website"].casefold(), specialty)).fetchone():
                         continue
                     conn.execute("INSERT OR IGNORE INTO businesses(id,name,website,city) VALUES(?,?,?,?)", (item["name"].casefold()+"|"+item["website"].casefold(), item["name"], item["website"], city))
                     conn.commit()
@@ -389,8 +378,10 @@ async def run():
                 if pending_sites:
                     await asyncio.gather(*pending_sites)
                     pending_sites.clear()
-                conn.execute("INSERT OR REPLACE INTO queries(city,specialty,done) VALUES(?,?,1)", (city,specialty))
-                conn.commit()
+                if query_complete:
+                    conn.execute("INSERT OR REPLACE INTO queries(city,specialty,done) VALUES(?,?,1)", (city,specialty))
+                    conn.commit()
+                watchdog_ping()
                 business_count = conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
                 email_count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
                 logging.info("%s | %s | %d map businesses | %d DNS-checked emails", place["query"] if isinstance(place, dict) else city, specialty, business_count, email_count)
@@ -424,6 +415,11 @@ if __name__ == "__main__":
     def request_stop(signum, frame):
         STOP.touch()
     signal.signal(signal.SIGTERM, request_stop)
+    if options.export_only:
+        print(f"Exported {export_csv(initialize_categories=True)} contacts to {OUT_DIR}")
+        conn.close()
+        campaign_lock.close()
+        raise SystemExit(0)
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

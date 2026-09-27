@@ -1,6 +1,6 @@
 # Lietuvos verslų vieši el. paštai
 
-CSV failai saugomi atidaryto darbo aplanko šaknyje, `../leads/`, kad juos būtų lengva rasti. `all_leads.csv` turi tik du stulpelius: `Pavadinimas` ir `El. paštas`. Specialybės CSV sukuriami tik radus pirmą adresą tai specialybei, todėl tuščių failų krūvos nėra.
+CSV failai saugomi atidaryto darbo aplanko šaknyje, `../leads/lithuania/`, kad juos būtų lengva rasti. `all_leads.csv` turi tik du stulpelius: `Pavadinimas` ir `El. paštas`. Specialybės CSV sukuriami tik radus pirmą adresą tai specialybei, todėl tuščių failų krūvos nėra.
 
 Programa naudoja 238 atrinktas specialybes ir 103 Lietuvos miestus. Ji tikrina viešus verslo svetainių kontaktų puslapius ir `robots.txt`; adresą įrašo, jei jis paskelbtas viešai, o jo domenas turi MX arba A DNS įrašą. DNS patikra patvirtina domeną, bet ne konkrečios pašto dėžutės veikimą. Bendrame CSV el. paštai nedubliuojami.
 
@@ -27,3 +27,5 @@ Programa nenaudoja modelio API ar AI tokenų. Paieškos progresas saugomas `resu
 Jis tęsia progresą ir sustoja ties 30 000 el. paštų arba 100 000 verslų riba. Žurnalas yra `results/fast-leads.log`, proceso PID – `results/overnight.pid`. Tvarkingai sustabdyti galima `& .\stop_overnight.ps1`; programa užbaigs pradėtą paiešką, išsaugos CSV ir sustos. Tiesioginė pilno rinkimo komanda pirmame plane yra `& '..\.venv\Scripts\python.exe' fast_leads.py --overnight`.
 
 Prieš rinkodaros siuntimą patikrink gavėjo statusą ir laikykis taikomų tiesioginės rinkodaros taisyklių. VDAI 2026 m. paaiškinime juridinių asmenų laiškams nurodomas paprastas atsisakymas kiekviename laiške, o fiziniams asmenims – išankstinio sutikimo reikalavimas.
+
+Kategorijų failai: `../leads/lithuania/categories/`. Šalių struktūra ir atkūrimas aprašyti `README-campaigns.md`.
