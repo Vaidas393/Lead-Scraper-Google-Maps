@@ -16,6 +16,7 @@ import signal
 import socket
 import os
 from campaign_storage import CampaignLock, export_country
+from campaign_schedule import scheduled_queries, campaign_deadline
 import time
 from contextlib import suppress
 from email.utils import parseaddr
@@ -35,6 +36,7 @@ from scraper.parsers import is_valid_email
 
 def parse_options():
     parser = argparse.ArgumentParser(description="Collect public business contacts, with separate country progress.")
+    parser.add_argument("--plan", choices=("full", "month"), default="full")
     parser.add_argument("--country", choices=("lithuania", "scotland"), default="lithuania")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--test-limit", type=int, default=10)
@@ -64,9 +66,17 @@ else:
     RESULTS = ROOT / "results" / COUNTRY
     STOP = RESULTS / "STOP"
 SPECIALTIES = json.loads(SPECIALTIES_FILE.read_text(encoding="utf-8-sig"))["specialties"]
+PLAN = None
+if options.plan == "month":
+    if COUNTRY != "scotland":
+        raise SystemExit("The month plan is currently defined only for Scotland")
+    PLAN = json.loads((ROOT / "campaigns" / "scotland-month.json").read_text(encoding="utf-8"))
+    by_id = {p["geoname_id"]: p for p in CITIES}
+    CITIES = [by_id[city_id] for city_id in PLAN["city_ids"]]
+    SPECIALTIES = PLAN["specialties"]
 if options.describe:
     print(json.dumps({"country": COUNTRY, "places": len(CITIES), "specialties": len(SPECIALTIES),
-                      "queries": len(CITIES)*len(SPECIALTIES), "output": str(OUT_DIR), "results": str(RESULTS)}))
+                      "plan": options.plan, "duration_days": PLAN["duration_days"] if PLAN else None, "queries": len(CITIES)*len(SPECIALTIES), "output": str(OUT_DIR), "results": str(RESULTS)}))
     raise SystemExit(0)
 OUT = OUT_DIR / "all_leads.csv"
 BY_SPECIALTY = OUT_DIR / "categories"
@@ -331,6 +341,12 @@ async def run():
     specialties = SPECIALTIES
     business_count = conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
     email_count = export_csv(initialize_categories=True)
+    deadline = campaign_deadline(conn, PLAN["name"], PLAN["duration_days"]) if PLAN else None
+    if deadline is not None and time.time() >= deadline:
+        logging.info("30-day campaign window ended; saved contacts are ready")
+        await http.aclose()
+        conn.close()
+        return
     browser = BrowserManager(headless=True, locale=PROFILE["locale"], timezone_id=PROFILE["timezone"])
     page = await asyncio.wait_for(browser.start(), timeout=90)
     watchdog_ping()
@@ -339,55 +355,57 @@ async def run():
     try:
         failed_streak = 0
         selected_specialties = specialties[:SPECIALTY_LIMIT_COUNT] if SPECIALTY_LIMIT_COUNT is not None else specialties
-        for specialty in selected_specialties:
-            for place in cities:
-                city = str(place["geoname_id"]) if isinstance(place, dict) else place
-                if STOP.exists():
-                    logging.info("Stopped at operator request")
-                    return
-                done = conn.execute("SELECT done FROM queries WHERE city=? AND specialty=?", (city, specialty)).fetchone()
-                if done and done[0]:
-                    continue
+        for place, specialty in scheduled_queries(cities, selected_specialties, PLAN["phase_ends"] if PLAN else None):
+            if deadline is not None and time.time() >= deadline:
+                logging.info("30-day campaign window ended; saving completed work")
+                return
+            city = str(place["geoname_id"]) if isinstance(place, dict) else place
+            if STOP.exists():
+                logging.info("Stopped at operator request")
+                return
+            done = conn.execute("SELECT done FROM queries WHERE city=? AND specialty=?", (city, specialty)).fetchone()
+            if done and done[0]:
+                continue
+            found = await maps_records(page, place, specialty)
+            if found is None:
+                logging.warning("Retrying incomplete Maps search: %s | %s", city, specialty)
+                await page.wait_for_timeout(2000)
                 found = await maps_records(page, place, specialty)
                 if found is None:
-                    logging.warning("Retrying incomplete Maps search: %s | %s", city, specialty)
-                    await page.wait_for_timeout(2000)
-                    found = await maps_records(page, place, specialty)
-                    if found is None:
-                        failed_streak += 1
-                        logging.error("Skipping failed search for now; it remains resumable: %s | %s", city, specialty)
-                        if failed_streak >= 4:
-                            raise RuntimeError("Four consecutive Maps failures; restart the browser and retry unfinished queries")
-                        continue
-                failed_streak = 0
-                query_complete = True
-                for item in found:
-                    if LEAD_LIMIT is not None and conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0] >= LEAD_LIMIT:
-                        query_complete = False
-                        break
-                    item["specialty"] = specialty
-                    if conn.execute("SELECT 1 FROM checked_business_categories WHERE id=? AND specialty=?", (item["name"].casefold()+"|"+item["website"].casefold(), specialty)).fetchone():
-                        continue
-                    conn.execute("INSERT OR IGNORE INTO businesses(id,name,website,city) VALUES(?,?,?,?)", (item["name"].casefold()+"|"+item["website"].casefold(), item["name"], item["website"], city))
-                    conn.commit()
-                    pending_sites.add(asyncio.create_task(checked_crawl(item)))
-                    if len(pending_sites) >= max(8, options.site_concurrency * 3):
-                        done, pending_sites = await asyncio.wait(pending_sites, return_when=asyncio.FIRST_COMPLETED)
-                        for task in done:
-                            task.result()
-                if pending_sites:
-                    await asyncio.gather(*pending_sites)
-                    pending_sites.clear()
-                if query_complete:
-                    conn.execute("INSERT OR REPLACE INTO queries(city,specialty,done) VALUES(?,?,1)", (city,specialty))
-                    conn.commit()
-                watchdog_ping()
-                business_count = conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
-                email_count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
-                logging.info("%s | %s | %d map businesses | %d DNS-checked emails", place["query"] if isinstance(place, dict) else city, specialty, business_count, email_count)
-                if (LEAD_LIMIT is not None and email_count >= LEAD_LIMIT) or business_count >= MAX_BUSINESSES or email_count >= MAX_EMAILS:
-                    logging.info("Requested lead limit reached; stopping after the test batch.")
-                    return
+                    failed_streak += 1
+                    logging.error("Skipping failed search for now; it remains resumable: %s | %s", city, specialty)
+                    if failed_streak >= 4:
+                        raise RuntimeError("Four consecutive Maps failures; restart the browser and retry unfinished queries")
+                    continue
+            failed_streak = 0
+            query_complete = True
+            for item in found:
+                if LEAD_LIMIT is not None and conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0] >= LEAD_LIMIT:
+                    query_complete = False
+                    break
+                item["specialty"] = specialty
+                if conn.execute("SELECT 1 FROM checked_business_categories WHERE id=? AND specialty=?", (item["name"].casefold()+"|"+item["website"].casefold(), specialty)).fetchone():
+                    continue
+                conn.execute("INSERT OR IGNORE INTO businesses(id,name,website,city) VALUES(?,?,?,?)", (item["name"].casefold()+"|"+item["website"].casefold(), item["name"], item["website"], city))
+                conn.commit()
+                pending_sites.add(asyncio.create_task(checked_crawl(item)))
+                if len(pending_sites) >= max(8, options.site_concurrency * 3):
+                    done, pending_sites = await asyncio.wait(pending_sites, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        task.result()
+            if pending_sites:
+                await asyncio.gather(*pending_sites)
+                pending_sites.clear()
+            if query_complete:
+                conn.execute("INSERT OR REPLACE INTO queries(city,specialty,done) VALUES(?,?,1)", (city,specialty))
+                conn.commit()
+            watchdog_ping()
+            business_count = conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
+            email_count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
+            logging.info("%s | %s | %d map businesses | %d DNS-checked emails", place["query"] if isinstance(place, dict) else city, specialty, business_count, email_count)
+            if (LEAD_LIMIT is not None and email_count >= LEAD_LIMIT) or business_count >= MAX_BUSINESSES or email_count >= MAX_EMAILS:
+                logging.info("Requested lead limit reached; stopping after the test batch.")
+                return
         if SPECIALTY_LIMIT_COUNT is None:
             completed = conn.execute("SELECT COUNT(*) FROM queries WHERE done=1").fetchone()[0]
             if completed < len(cities) * len(specialties):
