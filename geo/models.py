@@ -76,5 +76,5 @@ class SearchUnit:
         base = f"{MAPS_SEARCH_BASE}/{quote_plus(self.query)}"
         if self.lat is not None and self.lng is not None:
             zoom = self.zoom if self.zoom is not None else 14
-            return f"{base}/@{self.lat:.7f},{self.lng:.7f},{zoom:g}z"
-        return base
+            return f"{base}/@{self.lat:.7f},{self.lng:.7f},{zoom:g}z?hl=en"
+        return base + "?hl=en"

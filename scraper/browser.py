@@ -85,6 +85,15 @@ class BrowserManager:
         await Stealth().apply_stealth_async(self._context)
         self._page = await self._context.new_page()
 
+        # EU sessions can land on Google's cookie choice instead of Maps.
+        # Keep optional cookies disabled before beginning any searches.
+        await self._page.goto(
+            "https://www.google.com/maps?hl=en", wait_until="domcontentloaded"
+        )
+        if "consent.google.com" in self._page.url:
+            await self._page.get_by_role("button", name="Reject all", exact=True).click()
+            await self._page.wait_for_url("https://www.google.com/maps**")
+
         logger.info(
             f"New context: {viewport['width']}x{viewport['height']}, "
             f"tz={self.timezone_id}, UA={user_agent[:48]}..."

@@ -164,7 +164,7 @@ class TestGrid:
 class TestSearchUnit:
     def test_plain_url(self):
         unit = SearchUnit(category="plumbers", query="plumbers in Katy, TX")
-        assert unit.url == "https://www.google.com/maps/search/plumbers+in+Katy%2C+TX"
+        assert unit.url == "https://www.google.com/maps/search/plumbers+in+Katy%2C+TX?hl=en"
 
     def test_tile_url_pins_coordinates(self):
         unit = SearchUnit(category="plumbers", query="plumbers in Houston",

@@ -1,0 +1,23 @@
+[Unit]
+Description=Scotland public business contact collection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/lt-leads
+ExecStartPre=/usr/bin/rm -f /home/ubuntu/lt-leads/results/scotland/STOP
+ExecStart=/home/ubuntu/lt-leads/.venv/bin/python -u fast_leads.py --country scotland --overnight --site-concurrency 8
+Restart=on-failure
+RestartSec=120
+TimeoutStopSec=180
+KillSignal=SIGTERM
+KillMode=mixed
+MemoryMax=5G
+CPUQuota=160%
+TasksMax=512
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

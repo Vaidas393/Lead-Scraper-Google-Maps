@@ -150,7 +150,7 @@ async def _scrape_website_inner(page: Page, website_url: str) -> tuple[str | Non
         # not just navigation, so a page that never settles cannot wedge us.
         new_page.set_default_timeout(settings.WEBSITE_TIMEOUT_MS)
         new_page.set_default_navigation_timeout(settings.WEBSITE_TIMEOUT_MS)
-        targets = [website_url] + contact_page_urls(website_url, limit=2)
+        targets = [website_url] + contact_page_urls(website_url, limit=4)
 
         for index, url in enumerate(targets):
             try:
@@ -203,7 +203,7 @@ async def _scrape_website(page: Page, website_url: str, cfg: RunConfig) -> tuple
     ``evaluate`` waiting for an execution context indefinitely, and one
     hostile business site must never stall the entire run.
     """
-    budget = (settings.WEBSITE_TIMEOUT_MS / 1000.0) * 3 + 10.0
+    budget = (settings.WEBSITE_TIMEOUT_MS / 1000.0) * 5 + 10.0
     try:
         return await asyncio.wait_for(
             _scrape_website_inner(page, website_url), timeout=budget
@@ -485,6 +485,7 @@ async def search_and_scrape(
             continue
 
     if not feed_selector:
+        logger.warning("Missing feed at %s: %s", page.url, (await page.locator("body").inner_text())[:500])
         if await wait_for_detail_panel(page):
             raw = await extract_detail(page)
             business = _build_business(raw, page.url, unit)

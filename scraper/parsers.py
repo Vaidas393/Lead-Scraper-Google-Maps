@@ -217,5 +217,7 @@ def contact_page_urls(website_url: str, limit: int = 3) -> list[str]:
     if not parsed.scheme or not parsed.hostname:
         return []
     root = f"{parsed.scheme}://{parsed.netloc}"
-    paths = ["/contact", "/contact-us", "/about", "/about-us", "/contactus"]
+    paths = (["/kontaktai", "/kontaktai/", "/apie-mus", "/contact"]
+             if parsed.hostname.lower().endswith(".lt") else
+             ["/contact", "/contact-us", "/about", "/about-us", "/contactus"])
     return [f"{root}{path}" for path in paths[:limit]]
