@@ -1,6 +1,6 @@
 # Official image: Python + baseline OS packages for browsers.
 # Keep the image tag and `playwright==` in requirements.txt on the same release.
-FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.63.0-noble
 
 WORKDIR /app
 
@@ -15,3 +15,4 @@ COPY . .
 
 # Default: non-interactive headless run (override in docker-compose or `docker run`).
 CMD ["python", "main.py", "--headless", "-y"]
+
