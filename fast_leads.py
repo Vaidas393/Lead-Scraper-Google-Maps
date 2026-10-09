@@ -349,7 +349,7 @@ async def run():
     email_count = export_csv(initialize_categories=True)
     deadline = campaign_deadline(conn, PLAN["name"], PLAN["duration_days"]) if PLAN else None
     if deadline is not None and time.time() >= deadline:
-        logging.info("30-day campaign window ended; saved contacts are ready")
+        logging.info("Campaign deadline reached; saved contacts are ready")
         await http.aclose()
         conn.close()
         return
@@ -363,7 +363,7 @@ async def run():
         selected_specialties = specialties[:SPECIALTY_LIMIT_COUNT] if SPECIALTY_LIMIT_COUNT is not None else specialties
         for place, specialty in scheduled_queries(cities, selected_specialties, PLAN["phase_ends"] if PLAN else None):
             if deadline is not None and time.time() >= deadline:
-                logging.info("30-day campaign window ended; saving completed work")
+                logging.info("Campaign deadline reached; saving completed work")
                 return
             city = str(place["geoname_id"]) if isinstance(place, dict) else place
             if STOP.exists():

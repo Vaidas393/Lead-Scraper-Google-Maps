@@ -70,3 +70,9 @@ Before switching campaigns, the old Scotland database, logs and exports were arc
 ## October 9 recovery fix
 
 Single-place Maps responses are valid results, including a listing without a website. Explicit empty results are also valid; unknown, consent and blocked pages remain incomplete. Failed queries persist an exponential retry delay (15 minutes up to 24 hours) so a restart can advance beyond repeatedly failing searches. The completed-query and contact tables, original deadline, and country outputs are preserved. A pre-repair SQLite backup is stored in the Scotland results directory.
+
+## October 9 expansion (current configuration)
+
+The active plan now covers 320 towns and the same 148 consolidated specialties: 47,360 total queries. The original 160-town schedule remains an unchanged prefix, followed by two additional 80-town phases. Existing completed queries and contacts are preserved. All 32 council areas remain represented.
+
+The existing VPS campaign deadline was explicitly extended from October 27 to November 27, 2026, at the same UTC time. The database deadline remains authoritative and survives restarts. New campaigns using this profile default to 61 elapsed days. The earlier 30-day/160-town sections describe the original configuration. Completion before the deadline depends on observed throughput; the deadline is a stop boundary, not a guarantee of exhaustive coverage.
