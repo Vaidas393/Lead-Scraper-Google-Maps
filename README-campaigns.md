@@ -66,3 +66,7 @@ The month plan has 23,680 queries. Phase 1 covers 40 towns including all council
 A persistent SQLite deadline starts at the first scan and expires after 30 elapsed days, including downtime. Restarts never extend it. At expiry the runner finishes the current query, exports the results, and exits successfully; systemd leaves it stopped. If all queries finish earlier, it stops earlier. No promise of every Scottish business is made. `--describe` and `--export-only` do not start the clock.
 
 Before switching campaigns, the old Scotland database, logs and exports were archived outside the live directories. Lithuania was not reset. Live outputs remain `../leads/scotland/all_leads.csv` and `../leads/scotland/categories/`.
+
+## October 9 recovery fix
+
+Single-place Maps responses are valid results, including a listing without a website. Explicit empty results are also valid; unknown, consent and blocked pages remain incomplete. Failed queries persist an exponential retry delay (15 minutes up to 24 hours) so a restart can advance beyond repeatedly failing searches. The completed-query and contact tables, original deadline, and country outputs are preserved. A pre-repair SQLite backup is stored in the Scotland results directory.

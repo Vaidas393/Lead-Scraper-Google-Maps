@@ -17,6 +17,8 @@ import socket
 import os
 from campaign_storage import CampaignLock, export_country
 from campaign_schedule import scheduled_queries, campaign_deadline
+from campaign_recovery import without_feed, init_retries, defer_query, retry_ready
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 import time
 from contextlib import suppress
 from email.utils import parseaddr
@@ -104,6 +106,7 @@ conn.execute("CREATE TABLE IF NOT EXISTS checked_business_categories (id TEXT, s
 conn.execute("CREATE TABLE IF NOT EXISTS emails (email TEXT PRIMARY KEY, name TEXT, mx_ok INTEGER, source TEXT)")
 conn.execute("CREATE TABLE IF NOT EXISTS email_categories (email TEXT, name TEXT, specialty TEXT, PRIMARY KEY(email,specialty))")
 conn.commit()
+init_retries(conn)
 
 site_sem = asyncio.Semaphore(max(1, options.site_concurrency))
 domain_locks: dict[str, asyncio.Lock] = {}
@@ -320,7 +323,10 @@ async def maps_records(page, city, specialty):
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=25000)
         feed = page.locator('div[role="feed"]').first
-        await feed.wait_for(state="visible", timeout=8000)
+        try:
+            await feed.wait_for(state="visible", timeout=8000)
+        except PlaywrightTimeoutError:
+            return await without_feed(page)
         results = {}
         for _ in range(SCROLL_ROUNDS + 1):
             state = await page.evaluate("window.APP_INITIALIZATION_STATE")
@@ -366,12 +372,17 @@ async def run():
             done = conn.execute("SELECT done FROM queries WHERE city=? AND specialty=?", (city, specialty)).fetchone()
             if done and done[0]:
                 continue
+            if not retry_ready(conn, city, specialty, time.time()):
+                continue
             found = await maps_records(page, place, specialty)
             if found is None:
                 logging.warning("Retrying incomplete Maps search: %s | %s", city, specialty)
                 await page.wait_for_timeout(2000)
                 found = await maps_records(page, place, specialty)
                 if found is None:
+                    delay = defer_query(conn, city, specialty, time.time())
+                    logging.warning("Deferred %s | %s for %ds", city, specialty, delay)
+                    watchdog_ping()
                     failed_streak += 1
                     logging.error("Skipping failed search for now; it remains resumable: %s | %s", city, specialty)
                     if failed_streak >= 4:
@@ -398,6 +409,7 @@ async def run():
                 pending_sites.clear()
             if query_complete:
                 conn.execute("INSERT OR REPLACE INTO queries(city,specialty,done) VALUES(?,?,1)", (city,specialty))
+                conn.execute("DELETE FROM query_retries WHERE city=? AND specialty=?", (city,specialty))
                 conn.commit()
             watchdog_ping()
             business_count = conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
